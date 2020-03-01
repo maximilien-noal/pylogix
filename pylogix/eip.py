@@ -2,7 +2,7 @@
    Originally created by Burt Peterson
    Updated and maintained by Dustin Roeder (dmroeder@gmail.com)
 
-   Copyright 2019 Dustin Roeder
+   Copyright 2020 Dustin Roeder
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -36,6 +36,7 @@ class PLC:
         self.IPAddress = ip_address
         self.ProcessorSlot = slot
         self.Micro800 = False
+        self.Route = [(0x01, self.ProcessorSlot)]
         self.Port = 44818
         self.VendorID = 0x1337
         self.Context = 0x00
@@ -426,8 +427,6 @@ class PLC:
         eip_header = self._buildEIPHeader(request)
         status, ret_data = self._getBytes(eip_header)
 
-        #tags = [t[0] for t in stuff]
-
         return self._multiWriteParser(write_data, ret_data)
 
     def _getPLCTime(self, raw=False):
@@ -651,7 +650,10 @@ class PLC:
         return ret_data
 
     def _buildTemplateAttributes(self, instance):
-
+        """
+        Build the template attribute packet, part of
+        retreiving the UDT names
+        """
         TemplateService = 0x03
         TemplateLength = 0x03
         TemplateClassType = 0x20
@@ -678,7 +680,10 @@ class PLC:
                     Attrib1)
 
     def _readTemplateService(self, instance, dataLen):
-
+        """
+        Build the template attribute packet, part of
+        retreiving the UDT names
+        """
         TemplateService = 0x4c
         TemplateLength = 0x03
         TemplateClassType = 0x20
@@ -699,6 +704,10 @@ class PLC:
                     DataLength)
 
     def _discover(self):
+        """
+        Discover devices on the network, similar to the RSLinx
+        Ethernet I/P driver
+        """
         devices = []
         request = self._buildListIdentity()
 
@@ -761,24 +770,18 @@ class PLC:
         AttributeClass = 0x01
         AttributeInstanceType = 0x24
         AttributeInstance = 0x01
-        PathRouteSize = 0x01
-        Reserved = 0x00
-        Backplane = 0x01
-        LinkAddress = slot
 
-        AttributePacket = pack('<10B',
+        AttributePacket = pack('<6B',
                                AttributeService,
                                AttributeSize,
                                AttributeClassType,
                                AttributeClass,
                                AttributeInstanceType,
-                               AttributeInstance,
-                               PathRouteSize,
-                               Reserved,
-                               Backplane,
-                               LinkAddress)
+                               AttributeInstance)
 
-        frame = self._buildCIPUnconnectedSend() + AttributePacket
+        ConnectionPath = self._unconnectedPath(slot)
+
+        frame = self._buildCIPUnconnectedSend() + AttributePacket + ConnectionPath
         eip_header = self._buildEIPSendRRDataHeader(len(frame)) + frame
         pad = pack('<I', 0x00)
         self.Socket.send(eip_header)
@@ -813,7 +816,9 @@ class PLC:
                                AttributeInstanceType,
                                AttributeInstance)
 
-        frame = AttributePacket
+        ConnectionPath = self._unconnectedPath(slot=0)
+
+        frame = self._buildCIPUnconnectedSend() + AttributePacket + ConnectionPath
         eip_header = self._buildEIPSendRRDataHeader(len(frame)) + frame
         pad = pack('<I', 0x00)
         self.Socket.send(eip_header)
@@ -939,6 +944,9 @@ class PLC:
                     EIPOptionFlag)
 
     def _buildUnregisterSession(self):
+        """
+        Build Unregister session
+        """
         EIPCommand = 0x66
         EIPLength = 0x0
         EIPSessionHandle = self.SessionHandle
@@ -1033,16 +1041,9 @@ class PLC:
                            CIPTransportTrigger)
 
         # add the connection path
-        if self.Micro800:
-            ConnectionPath = [0x20, 0x02, 0x24, 0x01]
-        else:
-            ConnectionPath = [0x01, self.ProcessorSlot, 0x20, 0x02, 0x24, 0x01]
+        ConnectionPath = self._connectedPath()
 
-        ConnectionPathSize = int(len(ConnectionPath)/2)
-        pack_format = '<B' + str(len(ConnectionPath)) + 'B'
-        CIPConnectionPath = pack(pack_format, ConnectionPathSize, *ConnectionPath)
-
-        return ForwardOpen + CIPConnectionPath
+        return ForwardOpen + ConnectionPath
 
     def _buildForwardClose(self):
         """
@@ -1075,18 +1076,14 @@ class PLC:
                             CIPOriginatorSerialNumber)
 
         # add the connection path
-        if self.Micro800:
-            ConnectionPath = [0x20, 0x02, 0x24, 0x01]
-        else:
-            ConnectionPath = [0x01, self.ProcessorSlot, 0x20, 0x02, 0x24, 0x01]
-
-        ConnectionPathSize = int(len(ConnectionPath)/2)
-        pack_format = '<H' + str(len(ConnectionPath)) + 'B'
-        CIPConnectionPath = pack(pack_format, ConnectionPathSize, *ConnectionPath)
+        ConnectionPath = self._connectionPath()
 
         return ForwardClose + CIPConnectionPath
 
     def _buildEIPSendRRDataHeader(self, frameLen):
+        """
+        Build the EIP Send RR Data Header
+        """
         EIPCommand = 0x6F
         EIPLength = 16+frameLen
         EIPSessionHandle = self.SessionHandle
@@ -1143,6 +1140,66 @@ class PLC:
                     CIPPriority,
                     CIPTimeoutTicks,
                     ServiceSize)
+
+    def _connectedPath(self):
+        """
+        Build the connected path porition of the packet
+        """
+        path = []
+        if self.Micro800:
+            pass
+        else:
+            for segment in self.Route:
+                if isinstance(segment[1], int):
+                    # port segment
+                    path += segment
+                else:
+                    # port segment with link
+                    path.append(segment[0]+0x10)
+                    path.append(len(segment[1]))
+                    for c in segment[1]:
+                        path.append(ord(c))
+                    # byte align
+                    if len(path)%2: 
+                        path.append(0x00)
+            
+        path += [0x20, 0x02, 0x24, 0x01]
+
+        path_size = int(len(path)/2)
+        pack_format = '<B' + str(len(path)) + 'B'
+        connection_path = pack(pack_format, path_size, *path)
+
+        return connection_path
+
+    def _unconnectedPath(self, slot):
+        """
+        Build the unconnection path portion of the packet
+        """
+        # if no route was provided, use the default route
+        if not self.Route:
+            self.Route = [(0x01, slot)]
+
+        reserved = 0x00
+        path = []
+        for segment in self.Route:
+            if isinstance(segment[1], int):
+                # port segment
+                path += segment
+            else:
+                # port segment with link
+                path.append(segment[0]+0x10)
+                path.append(len(segment[1]))
+                for c in segment[1]:
+                    path.append(ord(c))
+                # byte align
+                if len(path)%2: 
+                    path.append(0x00)
+        
+        path_size = len(path)/2
+        pack_format = '<{}BBB'.format(len(path))
+        connection_path = pack(pack_format, path_size, reserved, *path)
+
+        return connection_path
 
     def _buildTagIOI(self, tagName, data_type):
         """
