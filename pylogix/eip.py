@@ -89,8 +89,8 @@ class PLC:
         returns Response class (.TagName, .Value, .Status)
         """
         if isinstance(tag, (list, tuple)):
-            if len(tag) == 1:
-                return [self._readTag(tag[0], count, datatype)]
+            # if len(tag) == 1:
+            #     return [self._readTag(tag[0], count, datatype)]
             if datatype:
                 raise TypeError('Datatype should be set to None when reading lists')
             return self._multiRead(tag)
@@ -360,13 +360,22 @@ class PLC:
         # assemble all the segments
         for i in range(tag_count):
             segments += serviceSegments[i]
+            sum = 0
+            for j in serviceSegments[i]:
+                sum+=j
+            #print(sum)
 
         for i in range(tag_count-1):
             temp += len(serviceSegments[i])
+            #print(temp);
             offsets += pack('<H', temp)
 
         request = header + segmentCount + offsets + segments
         eip_header = self._buildEIPHeader(request)
+        sumHeader = 0
+        for i in eip_header:
+            sumHeader += i
+        print(sumHeader)
         status, ret_data = self._getBytes(eip_header)
 
         return self._multiReadParser(tags, ret_data)
@@ -1691,9 +1700,6 @@ class PLC:
             reply.append(response)
 
         return reply
-
-        
-
 
     def _buildListIdentity(self):
         """
